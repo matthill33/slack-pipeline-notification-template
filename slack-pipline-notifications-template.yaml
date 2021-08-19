@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  This template provisions all the resources needed to recieve slack notifications for any aws service 
+  event. It provisions a lambda, a role, and an EventBridge rule to detect CodePipeline state changes.
+  All that needs to be done is to create a WebHook using the "Incoming Webhooks" slack integration, then
+  put the webhook url and the desired slack channel in as cloudformation parameters.
+
+Parameters:
+  WebhookURL:
+    Type: String
+    Description: URL created by the "Incoming WebHooks" slack integration
+  Channel:
+    Type: String
+    Description: Enter the desired slack channel to be notified with pound sign in front (example - "#monro")
+
+Resources:
+  # Create Lambda to send event info to WebHook/Slack
+  PipeLineEventToSlackLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: !GetAtt LambdaExecutionRole.Arn
+      FunctionName: 'pipelineEventToSlack'
+      Runtime: 'python3.6'
+      Handler: 'index.lambda_handler'
+      Environment: 
+        Variables:
+          url: 
+            Ref: WebhookURL
+          channel:
+            Ref: Channel
+      Code: 
+        ZipFile: |  
+          #!/usr/bin/python3.6
+          #env variables are channel and url
+          import urllib3
+          import json
+          import os
+          http = urllib3.PoolManager()
+          def lambda_handler(event, context):
+              channel = os.environ['channel']
+              url = os.environ['url']
+              text =  "Pipeline: " + event['detail']['pipeline'] +" is "+ event['detail']['state']
+              msg = {
+                  "channel": channel,
+                  "username": event['detail-type'],
+                  "text": text,
+                  "icon_emoji": ""
+              }
+              
+              encoded_msg = json.dumps(msg).encode('utf-8')
+              resp = http.request('POST',url, body=encoded_msg)
+              print({"message": event['source'], 
+                  "status_code": resp.status, 
+                  "response": resp.data
+              })      
+
+  # Create role to attach to lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        
+  # Create pipline rule
+  MonitorPipeLineRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: 'monitor execution state changes of pipeline'
+      Name: 'MonitorPipelineActivity'
+      State: 'ENABLED'
+      Targets: 
+        - Arn: !GetAtt PipeLineEventToSlackLambda.Arn
+          Id: 'ID999'
+      EventPattern:
+        source:
+           - aws.codepipeline
+        detail-type:
+          - 'CodePipeline Pipeline Execution State Change'
+  
+  # Create special permission so that the lambda is able to be invoked
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt
+        - PipeLineEventToSlackLambda
+        - Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+  
+
+      
